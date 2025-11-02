@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -32,7 +32,7 @@ public class ShaderGraphPatcherWindow : EditorWindow {
 	};
 
 	[MenuItem("Tools/Shader Graph Patcher")]
-	public static void Show() {
+	public static void ShowPatcher() {
 		ShaderGraphPatcherWindow wnd = GetWindow<ShaderGraphPatcherWindow>();
 		wnd.titleContent = new GUIContent("ShaderGraphPatcherWindow");
 	}
@@ -308,7 +308,7 @@ public class ShaderGraphPatcherWindow : EditorWindow {
 	}
 
 	// Taken from https://discussions.unity.com/t/how-to-get-shader-source-code-from-script/839046/3
-	private static object GetGraphData(string shaderAssetPath) {
+	private static ScriptableObject GetGraphData(string shaderAssetPath) {
 		var importer = AssetImporter.GetAtPath(shaderAssetPath);
 
 		var textGraph = File.ReadAllText(importer.assetPath, System.Text.Encoding.UTF8);
@@ -357,8 +357,8 @@ public class ShaderGraphPatcherWindow : EditorWindow {
 		// graphObject.graph.ValidateGraph();
 		graphDataType.GetMethod("ValidateGraph")!.Invoke(graphDataInstance, null);
 
-		// return graphData.graph
-		return graphDataInstance;
+		// return graphObject instead of graphDataInstance
+		return graphObject;
 	}
 
 	//Taken from https://discussions.unity.com/t/how-to-get-shader-source-code-from-script/839046/3
@@ -367,21 +367,41 @@ public class ShaderGraphPatcherWindow : EditorWindow {
 			Type.GetType("UnityEditor.ShaderGraph.Generator, Unity.ShaderGraph.Editor")!;
 		Type modeType =
 			Type.GetType("UnityEditor.ShaderGraph.GenerationMode, Unity.ShaderGraph.Editor")!;
+		Type graphObjectType = // Need this type to get the 'graph' property
+			Type.GetType("UnityEditor.Graphing.GraphObject, Unity.ShaderGraph.Editor")!;
+		Type graphDataType = // Need this type to call OnDisable/Dispose
+			Type.GetType("UnityEditor.ShaderGraph.GraphData, Unity.ShaderGraph.Editor")!;
 
 		shaderName ??= Path.GetFileNameWithoutExtension(shaderAssetPath);
 
-		object graphData = GetGraphData(shaderAssetPath);
+		// 1. Get the GraphObject (which is a ScriptableObject)
+		ScriptableObject graphObject = GetGraphData(shaderAssetPath);
+		
+		// 2. Get the 'graph' property (the GraphData) from the GraphObject
+		var graphObject_graphProperty = graphObjectType.GetProperty("graph")!;
+		object graphData = graphObject_graphProperty.GetValue(graphObject);
 
-		// new Generator(graphData, null, GenerationMode.ForReals, assetName, target:null, assetCollection:null, humanReadable: true);
+		// 3. Use the graphData to create the generator and get the code
 		object forReals = ((FieldInfo)modeType.GetMember("ForReals")[0]).GetValue(null);
 		object generator = Activator.CreateInstance(
 			generatorType,
 			new object[] { graphData, null, forReals, shaderName, null, null, true }
 		);
-		object shaderCode = generatorType
+		string shaderCode = (string)generatorType
 			.GetProperty("generatedShader", BindingFlags.Public | BindingFlags.Instance)!
 			.GetValue(generator);
+		
+		var onDisableMethod = graphDataType.GetMethod("OnDisable");
+		if (onDisableMethod != null) {
+			onDisableMethod.Invoke(graphData, null);
+		}
 
-		return (string)shaderCode;
+		if (graphData is IDisposable disposableGraph) {
+			disposableGraph.Dispose();
+		}
+		
+		DestroyImmediate(graphObject);
+
+		return shaderCode;
 	}
 }
